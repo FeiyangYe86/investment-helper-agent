@@ -1,29 +1,20 @@
 from dotenv import load_dotenv
 
 import operator
-
 from typing import Literal
 from typing_extensions import TypedDict, Annotated
-
-from IPython.display import Image, display
 
 from langchain.chat_models import init_chat_model
 from langchain.messages import AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import StateGraph, START, END
+from tools.ticker.metrics_tools import get_metrics_for_tickers, run_l1_screener
 
-print("Before tool import...")
-from tools.yfinance import get_ticker_info
-print("After tool import...")
-
-print("Before first try...")
 try:
     load_dotenv()
     model = init_chat_model(model="claude-haiku-4-5", model_provider="anthropic", temperature=0)
-
-    print("Defining tools...")
-    tools = [get_ticker_info]
+    print('=====')
+    tools = [get_metrics_for_tickers, run_l1_screener]
     tools_by_name = {tool.name: tool for tool in tools}
-    print("Binding tools...")
     model_with_tools = model.bind_tools(tools)
     print("Tools bound")
 except Exception as initE:
@@ -55,6 +46,7 @@ def tool_node(state: dict):
     result = []
     for tool_call in state['messages'][-1].tool_calls:
         tool = tools_by_name[tool_call['name']]
+        print('====> Calling tool ' + tool.name)
         observation = tool.invoke(tool_call['args'])
         result.append(ToolMessage(content=str(observation), tool_call_id=tool_call['id']))
 
@@ -87,7 +79,7 @@ agent_builder.add_edge('tool_node', 'llm_call')
 agent = agent_builder.compile()
 
 try:
-    messages = [HumanMessage(content="Get the stock price of SDR in ASX")]
+    messages = [HumanMessage(content="Analyze the performance of SDR.AX in ASX and suggest if I should buy it.")]
     print("Invoking agent...", flush=True)
     messages = agent.invoke({"messages": messages})
     print("Agent done, messages:", len(messages["messages"]), flush=True)
