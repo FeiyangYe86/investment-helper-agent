@@ -15,9 +15,20 @@ Usage:
 from datetime import datetime
 import sys
 import traceback
+from typing import Any
 
+from langchain_core.messages import ToolMessage
+from langchain_core.tools import InjectedToolCallId
 from langchain.tools import tool
+from typing import Annotated
 import pandas as pd
+from typing_extensions import TypedDict
+
+
+class ToolResult(TypedDict):
+    data: Any
+    errors_fatal: list[str]
+    errors_non_fatal: list[str]
 
 from tools.ticker.utils.code_fetcher import bulk_download_prices, bulk_fetch_fundamentals, get_tickers
 from tools.ticker.utils.exporter import export_results
@@ -174,11 +185,11 @@ def run_screener(
     print(f"{'='*60}\n")
 
     # Step 1: get all metrics
-    all_metrics = get_metrics_for_tickers(tickers, fundamental_workers)
+    result = _fetch_metrics(tickers, fundamental_workers)
 
     # Step 4: filter + score
     records, rejected = [], []
-    for metrics in all_metrics:
+    for metrics in result["data"]:
         passed, reason = passes_hard_filters(metrics, config)
         if not passed:
             rejected.append({"ticker": metrics["ticker"], "reason": reason})
@@ -225,43 +236,29 @@ def run_screener(
 
     return top_df
 
-@tool
-def get_metrics_for_tickers(
-    tickers: list[str],
-    fundamental_workers: int = 20
-) -> list[dict]:
-    """Fetch and compute technical and fundamental metrics for a list of stock tickers.
+def _fetch_metrics(tickers: list[str], fundamental_workers: int = 20) -> ToolResult:
+    """Core implementation for fetching and computing metrics. Returns a ToolResult."""
+    errors_fatal: list[str] = []
+    errors_non_fatal: list[str] = []
 
-    Use this tool when you need quantitative data to analyze or compare stocks. It returns
-    a rich set of indicators — price trends, momentum, volatility, valuation ratios, and
-    growth metrics — that are directly useful for screening, ranking, or evaluating tickers.
-
-    Args:
-        tickers: List of stock ticker symbols to analyze (e.g. ["AAPL", "MSFT", "NVDA"]).
-                 Tickers with no available price data are silently skipped.
-        fundamental_workers: Number of concurrent workers for fetching fundamental data.
-                             Defaults to 20. Increase for larger ticker lists.
-
-    Returns:
-        A list of metric dicts, one per valid ticker. Each dict includes fields such as:
-          - ticker: str — the ticker symbol
-          - price, price_change_*: current price and % change over various windows
-          - sma_*, ema_*: simple and exponential moving averages
-          - rsi, macd, bollinger_*: momentum and volatility indicators
-          - volume, avg_volume_*, relative_volume: volume statistics
-          - market_cap, pe_ratio, pb_ratio, ps_ratio, peg_ratio: valuation multiples
-          - revenue_growth, earnings_growth, profit_margin, roe, roa: fundamentals
-          - debt_to_equity, current_ratio, free_cash_flow: balance sheet metrics
-        Tickers for which metric computation fails are skipped and not included in output.
-    """
     # Step 1: bulk price download
     try:
         price_data = bulk_download_prices(tickers)
         valid_tickers = list(price_data.keys())
-        print(f"\n  Price data OK: {len(valid_tickers)}  |  Skipped (no data): {len(tickers) - len(valid_tickers)}\n")
+        missing = set(tickers) - set(valid_tickers)
+        print(f"\n  Price data OK: {len(valid_tickers)}  |  Skipped (no data): {len(missing)}\n")
+        if missing:
+            msg_template = (
+                "No price data found for '{t}'. Verify the symbol is correct "
+                "(e.g. ASX stocks require a '.AX' suffix, like 'CBA.AX')."
+            )
+            if len(missing) == len(tickers):
+                errors_fatal.extend(msg_template.format(t=t) for t in missing)
+            else:
+                errors_non_fatal.extend(msg_template.format(t=t) for t in missing)
     except Exception as downloadError:
-        # print("  Failed to download prices —", downloadError)
         traceback.print_exception(downloadError, file=sys.stdout)
+        return ToolResult(data=[], errors_fatal=[str(downloadError)], errors_non_fatal=[])
 
     # Step 2: concurrent fundamental fetch
     fundamentals = bulk_fetch_fundamentals(valid_tickers, max_workers=fundamental_workers)
@@ -279,11 +276,55 @@ def get_metrics_for_tickers(
             all_metrics.append(metrics)
         except Exception as e:
             print(f"  [SKIP {ticker}] metric computation failed: {e}")
-    
-    return all_metrics
+            errors_non_fatal.append(f"Metric computation partially failed for '{ticker}': {e}")
+
+    return ToolResult(data=all_metrics, errors_fatal=errors_fatal, errors_non_fatal=errors_non_fatal)
+
+
+@tool
+def get_metrics_for_tickers(
+    tickers: list[str],
+    tool_call_id: Annotated[str, InjectedToolCallId],
+    fundamental_workers: int = 20
+) -> ToolResult:
+    """Fetch and compute technical and fundamental metrics for a list of stock tickers.
+
+    Use this tool when you need quantitative data to analyze or compare stocks. It returns
+    a rich set of indicators — price trends, momentum, volatility, valuation ratios, and
+    growth metrics — that are directly useful for screening, ranking, or evaluating tickers.
+
+    Args:
+        tickers: List of stock ticker symbols to analyze (e.g. ["AAPL", "MSFT", "NVDA"]).
+                 Tickers with no available price data are silently skipped.
+        fundamental_workers: Number of concurrent workers for fetching fundamental data.
+                             Defaults to 20. Increase for larger ticker lists.
+
+    Returns:
+        A ToolMessage where:
+          - content: human-readable summary of how many tickers were fetched.
+          - artifact: a ToolResult dict with:
+              - data: list of metric dicts, one per valid ticker. Each dict includes fields such as:
+                  ticker, current_price, price_change_*, sma_*, ema_*, rsi_14, macd_*,
+                  bb_*, volume, avg_turnover_30d, market_cap, pe_ratio, pb_ratio,
+                  revenue_growth, earnings_growth, profit_margin, roe, roa,
+                  debt_to_equity, current_ratio, free_cash_flow, sector, score
+              - errors_fatal: set when ALL requested tickers have no price data, or a network/API
+                  failure prevents any download. Requires human clarification before proceeding.
+              - errors_non_fatal: set when SOME (but not all) tickers have no price data, or when
+                  metric computation fails for individual tickers. Analysis can continue on
+                  the valid subset.
+    """
+    print(f'===> print tool runtime tool_call_id: {tool_call_id}')
+    result = _fetch_metrics(tickers, fundamental_workers)
+    return ToolMessage(
+        content=f"Fetched metrics for {len(result['data'])} tickers.",
+        artifact=result,
+        tool_call_id=tool_call_id,
+    )
 
 @tool
 def run_l1_screener(
+    tool_call_id: Annotated[str, InjectedToolCallId],
     top: int = 20,
     minTurnover: int = 500_000,
     minCap: int = 100_000_000,
@@ -308,14 +349,19 @@ def run_l1_screener(
             For ASX 200-level universe screening, 100,000,000 is recommended. 
             Defaults to 100,000,000.
         source (str, optional): The source of the ticker universe.
-            'manual': Uses a pre-defined list of blue-chip and high-conviction sectors.
-            'asx200': Scrapes the latest S&P/ASX 200 index constituents in real-time.
+            'manual': Uses a pre-defined list of ASX 200 index.
+            'all': Scan all the tickers listed in ASX (about ~2000 tickers).
             Defaults to 'manual'.
 
     Returns:
-        str: The file path to the generated 'asx_candidates_for_llm.json' containing 
-             detailed metrics for the top candidates, or a warning message if no stocks 
-             passed the hard filters.
+        A ToolMessage where:
+          - content: human-readable summary of the screening outcome.
+          - artifact: a ToolResult dict with:
+              - data: file path to the generated 'asx_candidates_for_llm.json' containing
+                  detailed metrics for the top candidates, or None if no stocks passed filters.
+              - errors_fatal: set when no stocks passed the hard filters. Consider relaxing
+                  minTurnover or minCap and retrying.
+              - errors_non_fatal: always empty for this tool.
     """
     tickers = get_tickers(source)
 
@@ -332,10 +378,19 @@ def run_l1_screener(
         fundamental_workers=20,
     )
 
-    if not results.empty:
-        export_results(results)
-        print("\nNext step (LLM deep analysis):")
-        print("  Feed asx_candidates_for_llm.json to your LLM together with:")
-        print("  - Latest earnings summaries / analyst reports")
-        print("  - Commodity price moves relevant to each sector")
-        print("  - Recent macro data and geopolitical developments\n")
+    if results.empty:
+        result = ToolResult(
+            data=None,
+            errors_fatal=["No stocks passed the hard filters. Try relaxing minTurnover or minCap."],
+            errors_non_fatal=[],
+        )
+        return ToolMessage(content="Screener returned no results.", artifact=result, tool_call_id=tool_call_id)
+
+    file_path = export_results(results)
+    print("\nNext step (LLM deep analysis):")
+    print("  Feed asx_candidates_for_llm.json to your LLM together with:")
+    print("  - Latest earnings summaries / analyst reports")
+    print("  - Commodity price moves relevant to each sector")
+    print("  - Recent macro data and geopolitical developments\n")
+    result = ToolResult(data=file_path, errors_fatal=[], errors_non_fatal=[])
+    return ToolMessage(content=f"Screener complete. Results saved to {file_path}.", artifact=result, tool_call_id=tool_call_id)
