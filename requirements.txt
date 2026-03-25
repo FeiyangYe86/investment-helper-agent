@@ -206,3 +206,4 @@ websockets==16.0
 xxhash==3.6.0
 yfinance==1.2.0
 zstandard==0.25.0
+pytest>=8.0

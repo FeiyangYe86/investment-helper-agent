@@ -293,8 +293,18 @@ def get_metrics_for_tickers(
     a rich set of indicators — price trends, momentum, volatility, valuation ratios, and
     growth metrics — that are directly useful for screening, ranking, or evaluating tickers.
 
+    IMPORTANT — ticker format rules:
+        - ASX-listed stocks MUST include the '.AX' suffix, e.g. "WDS.AX", "CBA.AX", "BHP.AX".
+          Without it, yfinance will not find the stock and will silently return no data.
+        - US stocks use the plain symbol: "AAPL", "MSFT", "NVDA".
+        - If the user mentions an ASX ticker without the suffix (e.g. "WDS"), always append
+          '.AX' before calling this tool (e.g. "WDS.AX").
+        - Tickers returned by run_l1_screener already include '.AX' and can be passed directly.
+
     Args:
-        tickers: List of stock ticker symbols to analyze (e.g. ["AAPL", "MSFT", "NVDA"]).
+        tickers: List of stock ticker symbols to analyze.
+                 ASX examples: ["WDS.AX", "CBA.AX", "BHP.AX", "TLS.AX"]
+                 US examples:  ["AAPL", "MSFT", "NVDA"]
                  Tickers with no available price data are silently skipped.
         fundamental_workers: Number of concurrent workers for fetching fundamental data.
                              Defaults to 20. Increase for larger ticker lists.
@@ -362,6 +372,11 @@ def run_l1_screener(
               - errors_fatal: set when no stocks passed the hard filters. Consider relaxing
                   minTurnover or minCap and retrying.
               - errors_non_fatal: always empty for this tool.
+
+    Output ticker format:
+        All tickers in the output JSON already include the '.AX' suffix (e.g. "WDS.AX",
+        "CBA.AX"). Pass them directly to get_metrics_for_tickers, get_asx_announcements,
+        get_short_interest, and get_news_sentiment without any modification.
     """
     tickers = get_tickers(source)
 

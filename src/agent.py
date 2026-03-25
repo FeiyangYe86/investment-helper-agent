@@ -12,11 +12,22 @@ from langchain.messages import AnyMessage, HumanMessage, SystemMessage, ToolMess
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import interrupt
 from tools.ticker.metrics_tools import ToolResult, get_metrics_for_tickers, run_l1_screener
+from tools.ticker.macro_tools import get_macro_context
+from tools.ticker.announcements_tools import get_asx_announcements
+from tools.ticker.short_interest_tools import get_short_interest
+from tools.ticker.news_sentiment_tools import get_news_sentiment
 
 try:
     load_dotenv()
     model = init_chat_model(model="claude-haiku-4-5", model_provider="anthropic", temperature=0)
-    tools = [get_metrics_for_tickers, run_l1_screener]
+    tools = [
+        get_metrics_for_tickers,
+        run_l1_screener,
+        get_macro_context,
+        get_asx_announcements,
+        get_short_interest,
+        get_news_sentiment,
+    ]
     tools_by_name = {tool.name: tool for tool in tools}
     model_with_tools = model.bind_tools(tools)
     print("Tools bound")
@@ -30,7 +41,36 @@ def llm_call(state: dict):
             model_with_tools.invoke(
                 [
                     SystemMessage(
-                        content = 'You are a personal investor that want to invest on stocks to make money with low risks.'
+                        content = (
+                            "You are a disciplined personal investor focused on ASX stocks and crypto, "
+                            "prioritising capital protection alongside growth.\n\n"
+                            "When evaluating stocks, always apply a multi-factor validation framework:\n"
+                            "1. MACRO CONTEXT: Call get_macro_context first for every analysis session. "
+                            "A poor macro environment (rising rates, strengthening AUD, falling commodities) "
+                            "overrides bullish technicals. IMPORTANT — always report the live oil prices "
+                            "(WTI and Brent) explicitly, not just a trend label. Always report "
+                            "geopolitical_risk_level from the macro result. If it is 'elevated' or 'moderate', "
+                            "dedicate a section to explaining what the geopolitical event is, which sectors "
+                            "it affects (energy, materials, gold, financials), and what the binary risk "
+                            "scenarios are (escalation vs de-escalation). Never describe oil as 'neutral' "
+                            "if the 5-day change is large — report both the 5-day and 1-month moves.\n"
+                            "2. TECHNICAL & FUNDAMENTAL SCREENING: Use run_l1_screener to identify candidates, "
+                            "or get_metrics_for_tickers for specific tickers.\n"
+                            "3. NEWS SENTIMENT: Call get_news_sentiment for shortlisted tickers to catch "
+                            "material announcements not reflected in price yet.\n"
+                            "4. ASX ANNOUNCEMENTS: Call get_asx_announcements to check for red-flag corporate "
+                            "events (capital raises, ASIC actions, executive departures).\n"
+                            "5. SHORT INTEREST: Call get_short_interest to identify whether smart money is "
+                            "betting against a candidate.\n\n"
+                            "Final verdict must explicitly address all 5 factors. If any factor raises a "
+                            "red flag, state it clearly even if technicals look bullish. "
+                            "Never recommend a buy if: (1) macro is unfavorable AND geopolitical risk is "
+                            "not the reason (e.g. energy stocks benefit from geo risk + rising oil), "
+                            "(2) announcements show a capital raise or regulatory action, or "
+                            "(3) short interest is above 15% and rising. "
+                            "For energy stocks specifically: elevated geopolitical risk + rising oil is a "
+                            "near-term tailwind but always flag the binary ceasefire/de-escalation downside risk."
+                        )
                     )
                 ]
                 + state['messages']
